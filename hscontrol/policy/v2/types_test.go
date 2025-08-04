@@ -439,7 +439,7 @@ func TestUnmarshalPolicy(t *testing.T) {
 	],
 }
 `,
-			wantErr: `AutoGroup is invalid, got: "autogroup:invalid", must be one of [autogroup:internet autogroup:member autogroup:nonroot autogroup:tagged]`,
+			wantErr: `AutoGroup is invalid, got: "autogroup:invalid", must be one of [autogroup:internet autogroup:member autogroup:nonroot autogroup:tagged autogroup:self]`,
 		},
 		{
 			name: "undefined-hostname-errors-2490",
@@ -1043,6 +1043,8 @@ func TestResolvePolicy(t *testing.T) {
 		toResolve Alias
 		want      []netip.Prefix
 		wantErr   string
+		setNode   bool
+		current   int // index of node set as policy node
 	}{
 		{
 			name:      "prefix",
@@ -1368,6 +1370,19 @@ func TestResolvePolicy(t *testing.T) {
 			},
 		},
 		{
+			name: "autogroup-self",
+			nodes: types.Nodes{
+				{ID: 1, User: users["testuser"], IPv4: ap("100.100.101.1")},
+				{ID: 2, User: users["testuser"], IPv4: ap("100.100.101.2")},
+				{ID: 3, User: users["groupuser"], IPv4: ap("100.100.101.3")},
+			},
+			toResolve: ptr.To(AutoGroup(AutoGroupSelf)),
+			pol:       &Policy{},
+			want:      []netip.Prefix{mp("100.100.101.2/31")},
+			setNode:   true,
+			current:   0,
+		},
+		{
 			name:      "autogroup-invalid",
 			toResolve: ptr.To(AutoGroup("autogroup:invalid")),
 			wantErr:   "unknown autogroup",
@@ -1376,9 +1391,13 @@ func TestResolvePolicy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.setNode && tt.pol != nil && tt.current < len(tt.nodes) {
+				tt.pol.node = tt.nodes[tt.current].View()
+			}
+			nodes := tt.nodes.ViewSlice()
 			ips, err := tt.toResolve.Resolve(tt.pol,
 				xmaps.Values(users),
-				tt.nodes.ViewSlice())
+				nodes)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("got %v; want no error", err)

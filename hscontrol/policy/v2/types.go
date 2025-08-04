@@ -478,7 +478,8 @@ const (
 	AutoGroupNonRoot  AutoGroup = "autogroup:nonroot"
 	AutoGroupTagged   AutoGroup = "autogroup:tagged"
 
-	// These are not yet implemented.
+	// AutoGroupSelf represents all devices owned by the same user as the node
+	// for which the policy is being evaluated.
 	AutoGroupSelf AutoGroup = "autogroup:self"
 )
 
@@ -487,6 +488,7 @@ var autogroups = []AutoGroup{
 	AutoGroupMember,
 	AutoGroupNonRoot,
 	AutoGroupTagged,
+	AutoGroupSelf,
 }
 
 func (ag AutoGroup) Validate() error {
@@ -573,6 +575,22 @@ func (ag AutoGroup) Resolve(p *Policy, users types.Users, nodes views.Slice[type
 						break
 					}
 				}
+			}
+		}
+
+		return build.IPSet()
+
+	case AutoGroupSelf:
+		if p == nil {
+			return nil, errors.New("passed nil policy")
+		}
+		if !p.node.Valid() {
+			return nil, errors.New("policy node not set for autogroup:self")
+		}
+
+		for _, node := range nodes.All() {
+			if node.UserID() == p.node.UserID() && node.ID() != p.node.ID() {
+				node.AppendToIPSet(&build)
 			}
 		}
 
@@ -1263,6 +1281,10 @@ type Policy struct {
 	ACLs          []ACL              `json:"acls,omitempty"`
 	AutoApprovers AutoApproverPolicy `json:"autoApprovers,omitempty"`
 	SSHs          []SSH              `json:"ssh,omitempty"`
+
+	// node represents the context node for resolution. It is excluded from
+	// JSON and is used to resolve aliases like autogroup:self.
+	node types.NodeView `json:"-"`
 }
 
 // MarshalJSON is deliberately not implemented for Policy.
@@ -1270,12 +1292,12 @@ type Policy struct {
 
 var (
 	// TODO(kradalby): Add these checks for tagOwners and autoApprovers.
-	autogroupForSrc       = []AutoGroup{AutoGroupMember, AutoGroupTagged}
-	autogroupForDst       = []AutoGroup{AutoGroupInternet, AutoGroupMember, AutoGroupTagged}
-	autogroupForSSHSrc    = []AutoGroup{AutoGroupMember, AutoGroupTagged}
-	autogroupForSSHDst    = []AutoGroup{AutoGroupMember, AutoGroupTagged}
+	autogroupForSrc       = []AutoGroup{AutoGroupMember, AutoGroupTagged, AutoGroupSelf}
+	autogroupForDst       = []AutoGroup{AutoGroupInternet, AutoGroupMember, AutoGroupTagged, AutoGroupSelf}
+	autogroupForSSHSrc    = []AutoGroup{AutoGroupMember, AutoGroupTagged, AutoGroupSelf}
+	autogroupForSSHDst    = []AutoGroup{AutoGroupMember, AutoGroupTagged, AutoGroupSelf}
 	autogroupForSSHUser   = []AutoGroup{AutoGroupNonRoot}
-	autogroupNotSupported = []AutoGroup{AutoGroupSelf}
+	autogroupNotSupported = []AutoGroup{}
 )
 
 func validateAutogroupSupported(ag *AutoGroup) error {
@@ -1408,6 +1430,7 @@ func (p *Policy) validate() error {
 			}
 		}
 
+		hasSelfDst := false
 		for _, dst := range acl.Destinations {
 			switch dst.Alias.(type) {
 			case *Host:
@@ -1427,6 +1450,10 @@ func (p *Policy) validate() error {
 					errs = append(errs, err)
 					continue
 				}
+
+				if ag.Is(AutoGroupSelf) {
+					hasSelfDst = true
+				}
 			case *Group:
 				g := dst.Alias.(*Group)
 				if err := p.Groups.Contains(g); err != nil {
@@ -1436,6 +1463,14 @@ func (p *Policy) validate() error {
 				tagOwner := dst.Alias.(*Tag)
 				if err := p.TagOwners.Contains(tagOwner); err != nil {
 					errs = append(errs, err)
+				}
+
+				if hasSelfDst {
+					if len(acl.Sources) != 1 {
+						errs = append(errs, errors.New(`dst "autogroup:self" only works with one src "autogroup:member" or "autogroup:self"`))
+					} else if srcAg, ok := acl.Sources[0].(*AutoGroup); !ok || !(srcAg.Is(AutoGroupSelf) || srcAg.Is(AutoGroupMember)) {
+						errs = append(errs, errors.New(`dst "autogroup:self" only works with one src "autogroup:member" or "autogroup:self"`))
+					}
 				}
 			}
 		}
@@ -1482,6 +1517,7 @@ func (p *Policy) validate() error {
 				}
 			}
 		}
+		hasSelfDst := false
 		for _, dst := range ssh.Destinations {
 			switch dst := dst.(type) {
 			case *AutoGroup:
@@ -1495,11 +1531,23 @@ func (p *Policy) validate() error {
 					errs = append(errs, err)
 					continue
 				}
+
+				if ag.Is(AutoGroupSelf) {
+					hasSelfDst = true
+				}
 			case *Tag:
 				tagOwner := dst
 				if err := p.TagOwners.Contains(tagOwner); err != nil {
 					errs = append(errs, err)
 				}
+			}
+		}
+
+		if hasSelfDst {
+			if len(ssh.Sources) != 1 {
+				errs = append(errs, errors.New(`dst "autogroup:self" only works with one src "autogroup:member" or "autogroup:self"`))
+			} else if srcAg, ok := ssh.Sources[0].(*AutoGroup); !ok || !(srcAg.Is(AutoGroupSelf) || srcAg.Is(AutoGroupMember)) {
+				errs = append(errs, errors.New(`dst "autogroup:self" only works with one src "autogroup:member" or "autogroup:self"`))
 			}
 		}
 	}
